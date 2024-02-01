@@ -29,7 +29,16 @@ extern "C"{
 #include "lwip/dns.h"
 #include "lwip/err.h"
 }
+
+#include "esp_log.h"
 #include "esp_task_wdt.h"
+#include "esp_heap_caps.h"
+
+constexpr std::string_view TAG = "aTCP";
+namespace AsyncTcpSettings {
+  constexpr esp_log_level_t DEFAULT_LOG_LEVEL = ESP_LOG_INFO;
+  constexpr esp_log_level_t LOCAL_LOG_LEVEL = ESP_LOG_WARN;
+}
 
 /*
  * TCP/IP Event Task
@@ -78,6 +87,7 @@ typedef struct {
 
 static xQueueHandle _async_queue;
 static TaskHandle_t _async_service_task_handle = NULL;
+static StaticTask_t _async_static_task;
 
 
 SemaphoreHandle_t _slots_lock;
@@ -213,13 +223,29 @@ static void _stop_async_task(){
     }
 }
 */
+
+TaskHandle_t xTaskCreateUniversal2( TaskFunction_t pxTaskCode,
+                        const char * const pcName,
+                        const uint32_t usStackDepth,
+                        void * const pvParameters,
+                        UBaseType_t uxPriority,
+                        StaticTask_t &pxTaskBuffer,
+                        const BaseType_t xCoreID ){
+    static StackType_t *puxStackBuffer;
+    puxStackBuffer = static_cast<StackType_t *>(heap_caps_malloc(usStackDepth, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_32BIT));
+    return xTaskCreateStatic(pxTaskCode, pcName, usStackDepth, pvParameters, uxPriority, puxStackBuffer, &pxTaskBuffer);
+}
+
 static bool _start_async_task(){
+    constexpr size_t TCP_STACK_SIZE = 8192 * 2;
     if(!_init_async_event_queue()){
         return false;
     }
     if(!_async_service_task_handle){
-        xTaskCreateUniversal(_async_service_task, "async_tcp", 8192 * 2, NULL, 3, &_async_service_task_handle, CONFIG_ASYNC_TCP_RUNNING_CORE);
+        log_i("tcp stack running or core-%d", CONFIG_ASYNC_TCP_RUNNING_CORE);
+        _async_service_task_handle = xTaskCreateUniversal2(_async_service_task, "async_tcp", TCP_STACK_SIZE, NULL, 3, _async_static_task, CONFIG_ASYNC_TCP_RUNNING_CORE);
         if(!_async_service_task_handle){
+            log_e("falied to create tcp async service task");
             return false;
         }
     }
@@ -576,6 +602,9 @@ AsyncClient::AsyncClient(tcp_pcb* pcb)
         tcp_err(_pcb, &_tcp_error);
         tcp_poll(_pcb, &_tcp_poll, 1);
     }
+
+    // esp_log_level_set("*", AsyncTcpSettings::DEFAULT_LOG_LEVEL);
+    esp_log_level_set(TAG.data(), AsyncTcpSettings::LOCAL_LOG_LEVEL);
 }
 
 AsyncClient::~AsyncClient(){
@@ -756,7 +785,9 @@ size_t AsyncClient::add(const char* data, size_t size, uint8_t apiflags) {
     size_t will_send = (room < size) ? room : size;
     int8_t err = ERR_OK;
     err = _tcp_write(_pcb, _closed_slot, data, will_send, apiflags);
+    ESP_LOGI(TAG.data(), "ac::add q len=%d", tcp_sndqueuelen(_pcb)); // DEBUG
     if(err != ERR_OK) {
+        ESP_LOGE(TAG.data(), "ac::add  failed"); // DEBUG
         return 0;
     }
     return will_send;
@@ -768,8 +799,10 @@ bool AsyncClient::send(){
     if(err == ERR_OK){
         _pcb_busy = true;
         _pcb_sent_at = millis();
+        ESP_LOGI(TAG.data(), "ac::send qlen=%d", tcp_sndqueuelen(_pcb)); // DEBUG
         return true;
     }
+    ESP_LOGE(TAG.data(), "ac::send failed"); // DEBUG
     return false;
 }
 
