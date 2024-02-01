@@ -34,6 +34,8 @@ extern "C"{
 #include "esp_task_wdt.h"
 #include "esp_heap_caps.h"
 
+#include <string_view>
+
 constexpr std::string_view TAG = "aTCP";
 namespace AsyncTcpSettings {
   constexpr esp_log_level_t DEFAULT_LOG_LEVEL = ESP_LOG_INFO;
